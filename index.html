@@ -324,7 +324,7 @@
 
   <footer>
     <p id="footer-updated"></p>
-    <p>On-chain data from Arbitrum via the public Blockscout explorer API (no API key required). Spot and historical prices from the CoinGecko public API, using BTC and ETH as 1:1 proxies for WBTC and WETH. Every incoming WBTC/ETH/WETH transfer above a small dust threshold is treated as a DCA buy &mdash; outgoing transfers, if any, are not netted out. These are free, rate-limited public APIs: if a request is throttled, this page falls back to the last successful data it fetched in this browser (shown with a note above) rather than failing outright. This is an estimate for informational purposes, not financial or tax advice.</p>
+    <p>On-chain data from Arbitrum via the public Blockscout explorer API (no API key required). Spot and historical daily prices from Binance's public market data API (BTC/USDT and ETH/USDT), used as 1:1 proxies for WBTC and WETH. Every incoming WBTC/ETH/WETH transfer above a small dust threshold is treated as a DCA buy &mdash; outgoing transfers, if any, are not netted out. These are free public APIs: if a request is ever throttled, this page falls back to the last successful data it fetched in this browser (shown with a note above) rather than failing outright. This is an estimate for informational purposes, not financial or tax advice.</p>
   </footer>
 
 </div>
@@ -466,13 +466,24 @@
       }));
   }
 
-  // ---- CoinGecko price helpers ----
+  // ---- Price history (Binance public market data — no key, no 365-day cutoff like CoinGecko's free tier) ----
 
-  async function fetchHistory(coinId, fromMs, toMs) {
-    const fromS = Math.floor(fromMs / 1000) - 86400;
-    const toS = Math.ceil(toMs / 1000) + 3600;
-    const d = await fetchJson(`https://api.coingecko.com/api/v3/coins/${coinId}/market_chart/range?vs_currency=usd&from=${fromS}&to=${toS}`);
-    return d.prices || []; // [ [ms, price], ... ]
+  const BINANCE = "https://data-api.binance.vision/api/v3";
+
+  async function fetchHistory(symbol, fromMs, toMs) {
+    let start = fromMs - 86400000;
+    const end = toMs;
+    const out = [];
+    for (let i = 0; i < 20; i++) {
+      const url = `${BINANCE}/klines?symbol=${symbol}&interval=1d&startTime=${start}&limit=1000`;
+      const rows = await fetchJson(url);
+      if (!rows.length) break;
+      for (const k of rows) out.push([k[0], Number(k[4])]); // [open time, close price]
+      const lastOpen = rows[rows.length - 1][0];
+      if (rows.length < 1000 || lastOpen >= end) break;
+      start = lastOpen + 86400000;
+    }
+    return out; // [ [ms, price], ... ]
   }
 
   function priceAt(series, ts) {
@@ -522,9 +533,9 @@
       setStatus("Fetching BTC price history…");
       const now = Date.now();
       const firstTs = buys[0].timestamp;
-      const btcHist = await fetchWithCache("dca:hist:bitcoin", "BTC price", () => fetchHistory("bitcoin", firstTs, now));
+      const btcHist = await fetchWithCache("dca:hist:btc", "BTC price", () => fetchHistory("BTCUSDT", firstTs, now));
       setStatus("Fetching ETH price history…");
-      const ethHist = await fetchWithCache("dca:hist:ethereum", "ETH price", () => fetchHistory("ethereum", firstTs, now));
+      const ethHist = await fetchWithCache("dca:hist:eth", "ETH price", () => fetchHistory("ETHUSDT", firstTs, now));
       const current = {
         BTC: btcHist.length ? btcHist[btcHist.length - 1][1] : null,
         ETH: ethHist.length ? ethHist[ethHist.length - 1][1] : null,
