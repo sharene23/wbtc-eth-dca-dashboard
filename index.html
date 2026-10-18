@@ -324,7 +324,7 @@
 
   <footer>
     <p id="footer-updated"></p>
-    <p>On-chain data from Arbitrum via the public Blockscout explorer API (no API key required). Spot and historical prices from the CoinGecko public API, using BTC and ETH as 1:1 proxies for WBTC and WETH. Every incoming WBTC/ETH/WETH transfer above a small dust threshold is treated as a DCA buy &mdash; outgoing transfers, if any, are not netted out. This is an estimate for informational purposes, not financial or tax advice.</p>
+    <p>On-chain data from Arbitrum via the public Blockscout explorer API (no API key required). Spot and historical prices from the CoinGecko public API, using BTC and ETH as 1:1 proxies for WBTC and WETH. Every incoming WBTC/ETH/WETH transfer above a small dust threshold is treated as a DCA buy &mdash; outgoing transfers, if any, are not netted out. These are free, rate-limited public APIs: if a request is throttled, this page falls back to the last successful data it fetched in this browser (shown with a note above) rather than failing outright. This is an estimate for informational purposes, not financial or tax advice.</p>
   </footer>
 
 </div>
@@ -373,6 +373,14 @@
   function shortHash(h) {
     return h.slice(0, 8) + "…" + h.slice(-6);
   }
+  function fmtAge(ms) {
+    const s = Math.round(ms / 1000);
+    if (s < 90) return s + "s";
+    const m = Math.round(s / 60);
+    if (m < 90) return m + "m";
+    const h = Math.round(m / 60);
+    return h + "h";
+  }
 
   function sleep(ms) { return new Promise((res) => setTimeout(res, ms)); }
 
@@ -385,6 +393,35 @@
     }
     if (!r.ok) throw new Error("Request failed (" + r.status + ")");
     return r.json();
+  }
+
+  // ---- localStorage cache: last-known-good fallback when an API rate-limits us ----
+
+  const staleSources = []; // populated during a run; [{label, ageMs}]
+
+  function cacheGet(key) {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+  function cacheSet(key, data) {
+    try { localStorage.setItem(key, JSON.stringify({ data, ts: Date.now() })); } catch (e) { /* ignore (private mode, quota, etc.) */ }
+  }
+
+  async function fetchWithCache(cacheKey, label, fetchFn) {
+    try {
+      const data = await fetchFn();
+      cacheSet(cacheKey, data);
+      return data;
+    } catch (err) {
+      const cached = cacheGet(cacheKey);
+      if (cached) {
+        staleSources.push({ label, ageMs: Date.now() - cached.ts });
+        return cached.data;
+      }
+      throw err;
+    }
   }
 
   // ---- Paginated Blockscout fetchers ----
@@ -463,12 +500,14 @@
     emptyEl.classList.add("hidden");
     setStatus("Reading WBTC transfers…");
 
+    staleSources.length = 0;
+
     try {
-      const wbtcBuys = await fetchTokenBuys(address, WBTC, "WBTC", 8);
+      const wbtcBuys = await fetchWithCache(`dca:buys:${address}:wbtc`, "WBTC transfers", () => fetchTokenBuys(address, WBTC, "WBTC", 8));
       setStatus("Reading WETH transfers…");
-      const wethBuys = await fetchTokenBuys(address, WETH, "ETH", 18);
+      const wethBuys = await fetchWithCache(`dca:buys:${address}:weth`, "WETH transfers", () => fetchTokenBuys(address, WETH, "ETH", 18));
       setStatus("Reading native ETH transfers…");
-      const ethBuys = await fetchNativeEthBuys(address);
+      const ethBuys = await fetchWithCache(`dca:buys:${address}:eth`, "ETH transfers", () => fetchNativeEthBuys(address));
 
       let buys = [...wbtcBuys, ...wethBuys, ...ethBuys].sort((a, b) => a.timestamp - b.timestamp);
 
@@ -483,9 +522,9 @@
       setStatus("Fetching BTC price history…");
       const now = Date.now();
       const firstTs = buys[0].timestamp;
-      const btcHist = await fetchHistory("bitcoin", firstTs, now);
+      const btcHist = await fetchWithCache("dca:hist:bitcoin", "BTC price", () => fetchHistory("bitcoin", firstTs, now));
       setStatus("Fetching ETH price history…");
-      const ethHist = await fetchHistory("ethereum", firstTs, now);
+      const ethHist = await fetchWithCache("dca:hist:ethereum", "ETH price", () => fetchHistory("ethereum", firstTs, now));
       const current = {
         BTC: btcHist.length ? btcHist[btcHist.length - 1][1] : null,
         ETH: ethHist.length ? ethHist[ethHist.length - 1][1] : null,
@@ -504,7 +543,13 @@
       }
 
       render(buys, { btcHist, ethHist, current, firstTs, now });
-      setStatus("Updated " + new Date().toLocaleTimeString());
+      if (staleSources.length) {
+        const oldest = Math.max(...staleSources.map((s) => s.ageMs));
+        const names = [...new Set(staleSources.map((s) => s.label))].join(", ");
+        setStatus(`Rate-limited on ${names} — showing last known data (${fmtAge(oldest)} old). Try Refresh again shortly.`, true);
+      } else {
+        setStatus("Updated " + new Date().toLocaleTimeString());
+      }
       refreshBtn.classList.remove("hidden");
     } catch (err) {
       console.error(err);
